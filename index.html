@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Magic Story Reader V4.0 (iOS決戰版)</title>
+    <title>Magic Story Reader V5.0 (iOS直通版)</title>
     <style>
         :root {
             --primary: #6C5CE7;
@@ -77,8 +77,7 @@
         .word.word-active { background-color: var(--word-highlight); color: #d63031; transform: scale(1.1); font-weight: bold; }
 
         .zh-text { font-size: 1.1rem; color: #636e72; margin-top: 10px; border-top: 1px dashed #eee; padding-top: 5px; min-height: 1.2em; }
-        .loading { color: #b2bec3; font-style: italic; font-size: 0.9rem; }
-
+        
         .fab {
             position: fixed; bottom: 30px; right: 30px; width: 70px; height: 70px; border-radius: 50%;
             background: var(--secondary); color: white; display: flex; align-items: center; justify-content: center;
@@ -102,10 +101,9 @@
 
 <header>
     <div class="header-top">
-        <h1>📖 魔法故事書 V4.0</h1>
+        <h1>📖 魔法故事書 V5.0</h1>
         <button class="btn hidden" id="edit-btn">✏️ 換文章</button>
     </div>
-    
     <div class="controls hidden" id="play-controls">
         <select id="voiceSelect"><option>Loading...</option></select>
         <div style="display:flex; align-items:center; gap:5px; color:white; font-size:0.8rem;">
@@ -130,7 +128,6 @@ They became best friends forever.
             準備好後，點擊右下角按鈕 ▶️
         </div>
     </div>
-
     <div id="reader-area" class="hidden"></div>
 </main>
 
@@ -148,9 +145,8 @@ They became best friends forever.
         sentences: [],
         currentIdx: 0,
         synth: window.speechSynthesis,
-        // V4 核心變數
-        activeUtterance: null, // 全域追蹤目前正在講話的物件
-        runId: 0
+        activeUtterance: null, // 追蹤目前語音物件
+        runId: 0 // 流水號
     };
 
     window.addEventListener('DOMContentLoaded', () => {
@@ -169,7 +165,7 @@ They became best friends forever.
     function initVoices() {
         const select = document.getElementById('voiceSelect');
         const voices = state.synth.getVoices();
-        if(voices.length === 0) return;
+        if(voices.length === 0) return; // 沒聲音時不報錯
         
         select.innerHTML = '';
         let bestVoiceIndex = 0;
@@ -198,16 +194,25 @@ They became best friends forever.
         select.selectedIndex = bestVoiceIndex;
     }
 
+    // ========================
+    // 總按鈕邏輯 (加了防呆)
+    // ========================
     function handleMainBtnClick() {
-        if (state.mode === 'EDIT') {
-            const text = document.getElementById('text-input').value.trim();
-            if (!text) return alert("請先輸入文章！");
-            processText(text);
-            switchToReadMode();
-            playSentence(0);
-        } else {
-            if (state.playing) pauseReading();
-            else resumeReading();
+        try {
+            if (state.mode === 'EDIT') {
+                const text = document.getElementById('text-input').value.trim();
+                if (!text) return alert("請先輸入文章！");
+                processText(text);
+                switchToReadMode();
+                state.runId++;
+                playSentence(0);
+            } else {
+                if (state.playing) pauseReading();
+                else resumeReading();
+            }
+        } catch (e) {
+            console.error("Button Error:", e);
+            alert("發生錯誤，請重新整理");
         }
     }
 
@@ -220,10 +225,223 @@ They became best friends forever.
     }
 
     function switchToEditMode() {
-        killAllSounds(); // 切換模式時強制靜音
+        killSounds();
         state.mode = 'EDIT';
         document.getElementById('input-area').classList.remove('hidden');
         document.getElementById('reader-area').classList.add('hidden');
         document.getElementById('play-controls').classList.add('hidden');
         document.getElementById('edit-btn').classList.add('hidden');
-        updateBtnIcon('▶
+        updateBtnIcon('▶️');
+    }
+
+    function processText(text) {
+        const raw = text.replace(/([.?!])\s*(?=[A-Z"'])/g, "$1|").split("|");
+        const container = document.getElementById('reader-area');
+        container.innerHTML = '';
+        state.sentences = [];
+
+        raw.forEach((line, i) => {
+            if (!line.trim()) return;
+            const div = document.createElement('div');
+            div.className = 'sentence-block';
+            
+            const wordsHtml = line.trim().split(/([a-zA-Z0-9'-]+)/g).map(chunk => {
+                if (/[a-zA-Z0-9'-]+/.test(chunk)) {
+                    return `<span class="word" onclick="handleWordClick(event, '${chunk}')">${chunk}</span>`;
+                }
+                return chunk; 
+            }).join('');
+
+            div.innerHTML = `<div class="en-text">${wordsHtml}</div><div class="zh-text" id="trans-${i}"></div>`;
+            div.onclick = () => {
+                state.runId++;
+                playSentence(i);
+            };
+            
+            container.appendChild(div);
+            state.sentences.push({ 
+                text: line.trim(), 
+                el: div, 
+                transEl: document.getElementById(`trans-${i}`),
+                translated: false 
+            });
+        });
+    }
+
+    // ========================
+    // 聲音清除 (關鍵函式)
+    // ========================
+    function killSounds() {
+        // 1. 換號碼：讓還沒跑出來的 onend 失效
+        state.runId++;
+        state.playing = false;
+        
+        // 2. 拔掉回調：讓正在唸的這句沒有遺言
+        if (state.activeUtterance) {
+            state.activeUtterance.onend = null;
+            state.activeUtterance.onerror = null;
+            state.activeUtterance = null;
+        }
+
+        // 3. 瀏覽器閉嘴
+        state.synth.cancel();
+        updateBtnIcon('▶️');
+    }
+
+    // ========================
+    // 單字點擊 (修復了 iOS 靜音問題)
+    // ========================
+    function handleWordClick(event, word) {
+        event.stopPropagation();
+        
+        // 1. 清除所有聲音與排程
+        killSounds();
+        
+        // 2. UI 更新
+        document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
+        event.target.classList.add('word-active');
+
+        // 3. 立即播放 (移除 setTimeout，iOS 才能發聲)
+        const utter = new SpeechSynthesisUtterance(word);
+        
+        // 確保語音有載入，否則用預設
+        const voices = state.synth.getVoices();
+        const select = document.getElementById('voiceSelect');
+        if(voices.length > 0 && select.value >= 0) {
+            utter.voice = voices[select.value];
+        }
+        
+        state.activeUtterance = utter;
+        state.synth.speak(utter);
+
+        // 4. 翻譯
+        showToast(word);
+    }
+
+    async function showToast(word) {
+        const toast = document.getElementById('word-toast');
+        const tWord = document.getElementById('toast-word');
+        const tMean = document.getElementById('toast-mean');
+        
+        tWord.innerText = word;
+        tMean.innerText = "查詢中...";
+        toast.classList.add('show');
+        
+        try {
+            const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=en|zh-TW`);
+            const data = await res.json();
+            if (data.responseData) {
+                let mean = data.responseData.translatedText.replace(/[!.。]/g, "");
+                tMean.innerText = mean;
+            } else {
+                tMean.innerText = "無結果";
+            }
+        } catch (e) {
+            tMean.innerText = "網路錯誤";
+        }
+
+        setTimeout(() => {
+            toast.classList.remove('show');
+            document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
+        }, 3000);
+    }
+
+    // ========================
+    // 句子播放 (ID 驗證機制)
+    // ========================
+    function playSentence(index) {
+        const currentRunId = state.runId;
+
+        if (index >= state.sentences.length) {
+            killSounds();
+            return;
+        }
+
+        // 清理前一句
+        if (state.activeUtterance) state.activeUtterance.onend = null;
+        state.synth.cancel();
+
+        state.currentIdx = index;
+        state.playing = true;
+        updateBtnIcon('⏸');
+
+        document.querySelectorAll('.sentence-block').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
+        
+        const item = state.sentences[index];
+        item.el.classList.add('active');
+        item.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        if (!item.translated) {
+            doTranslate(item.text, item.transEl);
+            item.translated = true;
+        }
+
+        const utter = new SpeechSynthesisUtterance(item.text);
+        const voices = state.synth.getVoices();
+        const select = document.getElementById('voiceSelect');
+        if(voices.length > 0 && select.value >= 0) {
+            utter.voice = voices[select.value];
+        }
+        
+        utter.rate = document.getElementById('rate').value;
+
+        // 核心邏輯：驗證 ID
+        utter.onend = () => {
+            if (state.runId === currentRunId && state.playing) {
+                playSentence(index + 1);
+            }
+        };
+        
+        utter.onerror = (e) => {
+            console.log("Error", e); // 手機有時會因為 cancel 報錯，忽略即可
+            // 如果不是被手動 cancel 的，嘗試下一句
+            if (state.runId === currentRunId && state.playing && e.error !== 'interrupted') {
+                playSentence(index + 1);
+            }
+        };
+
+        state.activeUtterance = utter;
+        state.synth.speak(utter);
+    }
+
+    function pauseReading() {
+        state.runId++; 
+        state.synth.cancel();
+        state.playing = false;
+        updateBtnIcon('▶️');
+    }
+
+    function resumeReading() {
+        state.runId++;
+        playSentence(state.currentIdx);
+    }
+
+    function stopReading() {
+        killSounds();
+        state.currentIdx = 0;
+        document.querySelectorAll('.sentence-block').forEach(el => el.classList.remove('active'));
+    }
+
+    function updateBtnIcon(icon) {
+        const btn = document.getElementById('main-btn');
+        btn.innerText = icon;
+    }
+
+    async function doTranslate(text, el) {
+        el.innerHTML = '<span class="loading">翻譯中...</span>';
+        try {
+            const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|zh-TW`);
+            const data = await res.json();
+            if (data.responseData) {
+                el.innerText = data.responseData.translatedText;
+            } else {
+                el.innerText = "翻譯失敗";
+            }
+        } catch (e) {
+            el.innerText = "網路錯誤";
+        }
+    }
+</script>
+</body>
+</html>
