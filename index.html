@@ -5,19 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Magic Story Reader V5.0 (iOS直通版)</title>
+    <title>Magic Story Reader V7.0 (最終除錯版)</title>
     <style>
         :root {
-            --primary: #6C5CE7;
-            --secondary: #00CEC9;
-            --highlight: #FFF3CD;
-            --word-highlight: #FAB1A0;
-            --text: #2D3436;
-            --bg: #F5F6FA;
+            --primary: #6C5CE7; --secondary: #00CEC9; --highlight: #FFF3CD;
+            --word-highlight: #FAB1A0; --text: #2D3436; --bg: #F5F6FA;
         }
-
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg); color: var(--text);
@@ -25,26 +19,20 @@
             display: flex; flex-direction: column;
             overscroll-behavior: none;
         }
-
         header {
             background: var(--primary); color: white; padding: 10px 15px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 100;
         }
         .header-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
         h1 { margin: 0; font-size: 1.2rem; }
-
         .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 5px; }
         .hidden { display: none !important; }
         select, input[type=range] { padding: 5px; border-radius: 5px; border: none; font-size: 0.9rem; }
         select { max-width: 150px; }
-        
-        .btn {
-            background: #fdcb6e; color: #333; border: none; padding: 5px 12px;
-            border-radius: 20px; font-weight: bold; cursor: pointer;
-        }
+        .btn { background: #fdcb6e; color: #333; border: none; padding: 5px 12px; border-radius: 20px; font-weight: bold; cursor: pointer; }
 
         main { flex: 1; overflow-y: auto; padding: 20px; max-width: 800px; margin: 0 auto; width: 100%; position: relative; }
-
+        
         #input-area { display: flex; flex-direction: column; height: 100%; }
         textarea {
             flex: 1; width: 100%; padding: 15px; font-size: 1.3rem;
@@ -101,7 +89,7 @@
 
 <header>
     <div class="header-top">
-        <h1>📖 魔法故事書 V5.0</h1>
+        <h1>📖 魔法故事書 V7.0</h1>
         <button class="btn hidden" id="edit-btn">✏️ 換文章</button>
     </div>
     <div class="controls hidden" id="play-controls">
@@ -145,8 +133,9 @@ They became best friends forever.
         sentences: [],
         currentIdx: 0,
         synth: window.speechSynthesis,
-        activeUtterance: null, // 追蹤目前語音物件
-        runId: 0 // 流水號
+        activeUtterance: null,
+        runId: 0,
+        lastClick: 0
     };
 
     window.addEventListener('DOMContentLoaded', () => {
@@ -157,6 +146,10 @@ They became best friends forever.
     function setupEvents() {
         document.getElementById('main-btn').addEventListener('click', handleMainBtnClick);
         document.getElementById('edit-btn').addEventListener('click', switchToEditMode);
+        
+        // 【核心修正】只保留這一個監聽器，移除 processText 裡面的 onclick
+        document.getElementById('reader-area').addEventListener('click', handleReaderClick);
+
         if (speechSynthesis.onvoiceschanged !== undefined) {
             speechSynthesis.onvoiceschanged = initVoices;
         }
@@ -165,7 +158,7 @@ They became best friends forever.
     function initVoices() {
         const select = document.getElementById('voiceSelect');
         const voices = state.synth.getVoices();
-        if(voices.length === 0) return; // 沒聲音時不報錯
+        if(voices.length === 0) return;
         
         select.innerHTML = '';
         let bestVoiceIndex = 0;
@@ -180,8 +173,10 @@ They became best friends forever.
             select.appendChild(opt);
 
             let score = 0;
+            // 語音權重演算法
             if (v.name.includes('Google') && v.lang === 'en-US') score = 100;
             else if (v.name.includes('Samantha')) score = 95;
+            else if (v.name.includes('Daniel')) score = 92;
             else if (v.name.includes('Siri')) score = 90;
             else if (v.lang === 'en-US') score = 50;
             else if (v.lang.startsWith('en')) score = 10;
@@ -195,176 +190,66 @@ They became best friends forever.
     }
 
     // ========================
-    // 總按鈕邏輯 (加了防呆)
+    // 中央總管：處理點擊
     // ========================
-    function handleMainBtnClick() {
-        try {
-            if (state.mode === 'EDIT') {
-                const text = document.getElementById('text-input').value.trim();
-                if (!text) return alert("請先輸入文章！");
-                processText(text);
-                switchToReadMode();
-                state.runId++;
-                playSentence(0);
-            } else {
-                if (state.playing) pauseReading();
-                else resumeReading();
-            }
-        } catch (e) {
-            console.error("Button Error:", e);
-            alert("發生錯誤，請重新整理");
+    function handleReaderClick(e) {
+        // 1. 防手抖
+        const now = Date.now();
+        if (now - state.lastClick < 200) return;
+        state.lastClick = now;
+
+        // 2. 判斷點擊目標
+        // 如果是單字
+        if (e.target.classList.contains('word')) {
+            playSingleWord(e.target.innerText, e.target);
+            return;
+        }
+
+        // 如果是句子 (往上找 sentence-block)
+        const sentBlock = e.target.closest('.sentence-block');
+        if (sentBlock) {
+            const index = parseInt(sentBlock.dataset.index);
+            // 啟動句子播放：更新 Run ID
+            state.runId++;
+            playSentence(index);
         }
     }
 
-    function switchToReadMode() {
-        state.mode = 'READ';
-        document.getElementById('input-area').classList.add('hidden');
-        document.getElementById('reader-area').classList.remove('hidden');
-        document.getElementById('play-controls').classList.remove('hidden');
-        document.getElementById('edit-btn').classList.remove('hidden');
-    }
-
-    function switchToEditMode() {
-        killSounds();
-        state.mode = 'EDIT';
-        document.getElementById('input-area').classList.remove('hidden');
-        document.getElementById('reader-area').classList.add('hidden');
-        document.getElementById('play-controls').classList.add('hidden');
-        document.getElementById('edit-btn').classList.add('hidden');
-        updateBtnIcon('▶️');
-    }
-
-    function processText(text) {
-        const raw = text.replace(/([.?!])\s*(?=[A-Z"'])/g, "$1|").split("|");
-        const container = document.getElementById('reader-area');
-        container.innerHTML = '';
-        state.sentences = [];
-
-        raw.forEach((line, i) => {
-            if (!line.trim()) return;
-            const div = document.createElement('div');
-            div.className = 'sentence-block';
-            
-            const wordsHtml = line.trim().split(/([a-zA-Z0-9'-]+)/g).map(chunk => {
-                if (/[a-zA-Z0-9'-]+/.test(chunk)) {
-                    return `<span class="word" onclick="handleWordClick(event, '${chunk}')">${chunk}</span>`;
-                }
-                return chunk; 
-            }).join('');
-
-            div.innerHTML = `<div class="en-text">${wordsHtml}</div><div class="zh-text" id="trans-${i}"></div>`;
-            div.onclick = () => {
-                state.runId++;
-                playSentence(i);
-            };
-            
-            container.appendChild(div);
-            state.sentences.push({ 
-                text: line.trim(), 
-                el: div, 
-                transEl: document.getElementById(`trans-${i}`),
-                translated: false 
-            });
-        });
-    }
-
     // ========================
-    // 聲音清除 (關鍵函式)
+    // 播放邏輯
     // ========================
-    function killSounds() {
-        // 1. 換號碼：讓還沒跑出來的 onend 失效
-        state.runId++;
-        state.playing = false;
-        
-        // 2. 拔掉回調：讓正在唸的這句沒有遺言
-        if (state.activeUtterance) {
-            state.activeUtterance.onend = null;
-            state.activeUtterance.onerror = null;
-            state.activeUtterance = null;
-        }
 
-        // 3. 瀏覽器閉嘴
-        state.synth.cancel();
-        updateBtnIcon('▶️');
-    }
+    // 單字播放
+    function playSingleWord(word, element) {
+        // 強制停止其他聲音
+        killSounds(true); 
 
-    // ========================
-    // 單字點擊 (修復了 iOS 靜音問題)
-    // ========================
-    function handleWordClick(event, word) {
-        event.stopPropagation();
-        
-        // 1. 清除所有聲音與排程
-        killSounds();
-        
-        // 2. UI 更新
         document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
-        event.target.classList.add('word-active');
+        element.classList.add('word-active');
 
-        // 3. 立即播放 (移除 setTimeout，iOS 才能發聲)
         const utter = new SpeechSynthesisUtterance(word);
-        
-        // 確保語音有載入，否則用預設
-        const voices = state.synth.getVoices();
-        const select = document.getElementById('voiceSelect');
-        if(voices.length > 0 && select.value >= 0) {
-            utter.voice = voices[select.value];
-        }
-        
-        state.activeUtterance = utter;
+        setupVoice(utter);
         state.synth.speak(utter);
 
-        // 4. 翻譯
         showToast(word);
     }
 
-    async function showToast(word) {
-        const toast = document.getElementById('word-toast');
-        const tWord = document.getElementById('toast-word');
-        const tMean = document.getElementById('toast-mean');
-        
-        tWord.innerText = word;
-        tMean.innerText = "查詢中...";
-        toast.classList.add('show');
-        
-        try {
-            const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=en|zh-TW`);
-            const data = await res.json();
-            if (data.responseData) {
-                let mean = data.responseData.translatedText.replace(/[!.。]/g, "");
-                tMean.innerText = mean;
-            } else {
-                tMean.innerText = "無結果";
-            }
-        } catch (e) {
-            tMean.innerText = "網路錯誤";
-        }
-
-        setTimeout(() => {
-            toast.classList.remove('show');
-            document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
-        }, 3000);
-    }
-
-    // ========================
-    // 句子播放 (ID 驗證機制)
-    // ========================
+    // 句子播放 (包含自動下一句)
     function playSentence(index) {
         const currentRunId = state.runId;
 
         if (index >= state.sentences.length) {
-            killSounds();
+            stopReading();
             return;
         }
 
-        // 清理前一句
-        if (state.activeUtterance) state.activeUtterance.onend = null;
-        state.synth.cancel();
+        killSounds(false); // 停止聲音，但不換 Run ID，因為這是同一個 Run
 
         state.currentIdx = index;
         state.playing = true;
         updateBtnIcon('⏸');
 
+        // UI
         document.querySelectorAll('.sentence-block').forEach(el => el.classList.remove('active'));
         document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
         
@@ -378,25 +263,18 @@ They became best friends forever.
         }
 
         const utter = new SpeechSynthesisUtterance(item.text);
-        const voices = state.synth.getVoices();
-        const select = document.getElementById('voiceSelect');
-        if(voices.length > 0 && select.value >= 0) {
-            utter.voice = voices[select.value];
-        }
-        
+        setupVoice(utter);
         utter.rate = document.getElementById('rate').value;
 
-        // 核心邏輯：驗證 ID
+        // 核心防重疊檢查
         utter.onend = () => {
             if (state.runId === currentRunId && state.playing) {
                 playSentence(index + 1);
             }
         };
         
-        utter.onerror = (e) => {
-            console.log("Error", e); // 手機有時會因為 cancel 報錯，忽略即可
-            // 如果不是被手動 cancel 的，嘗試下一句
-            if (state.runId === currentRunId && state.playing && e.error !== 'interrupted') {
+        utter.onerror = () => {
+            if (state.runId === currentRunId && state.playing) {
                 playSentence(index + 1);
             }
         };
@@ -405,27 +283,122 @@ They became best friends forever.
         state.synth.speak(utter);
     }
 
-    function pauseReading() {
-        state.runId++; 
+    function killSounds(resetRunId) {
+        if(resetRunId) state.runId++; // 換 ID，讓等待中的 onend 失效
+        
+        if (state.activeUtterance) {
+            state.activeUtterance.onend = null;
+            state.activeUtterance.onerror = null;
+        }
         state.synth.cancel();
         state.playing = false;
         updateBtnIcon('▶️');
     }
 
-    function resumeReading() {
-        state.runId++;
-        playSentence(state.currentIdx);
+    function setupVoice(utter) {
+        const voices = state.synth.getVoices();
+        const select = document.getElementById('voiceSelect');
+        if(voices.length > 0 && select.value >= 0) {
+            utter.voice = voices[select.value];
+        }
+    }
+
+    // ========================
+    // 其他功能
+    // ========================
+    function handleMainBtnClick() {
+        if (state.mode === 'EDIT') {
+            const text = document.getElementById('text-input').value.trim();
+            if (!text) return alert("請先輸入文章！");
+            processText(text);
+            switchToReadMode();
+            state.runId++;
+            playSentence(0);
+        } else {
+            if (state.playing) killSounds(true); // 暫停
+            else {
+                state.runId++;
+                playSentence(state.currentIdx);
+            }
+        }
+    }
+
+    function processText(text) {
+        const raw = text.replace(/([.?!])\s*(?=[A-Z"'])/g, "$1|").split("|");
+        const container = document.getElementById('reader-area');
+        container.innerHTML = '';
+        state.sentences = [];
+
+        raw.forEach((line, i) => {
+            if (!line.trim()) return;
+            const div = document.createElement('div');
+            div.className = 'sentence-block';
+            div.dataset.index = i; // 綁定 Index
+            
+            // 這裡不再綁定 onclick，只負責產生 HTML
+            const wordsHtml = line.trim().split(/([a-zA-Z0-9'-]+)/g).map(chunk => {
+                if (/[a-zA-Z0-9'-]+/.test(chunk)) {
+                    return `<span class="word">${chunk}</span>`;
+                }
+                return chunk; 
+            }).join('');
+
+            div.innerHTML = `<div class="en-text">${wordsHtml}</div><div class="zh-text" id="trans-${i}"></div>`;
+            container.appendChild(div);
+            
+            state.sentences.push({ 
+                text: line.trim(), 
+                el: div, 
+                transEl: document.getElementById(`trans-${i}`),
+                translated: false 
+            });
+        });
     }
 
     function stopReading() {
-        killSounds();
+        killSounds(true);
         state.currentIdx = 0;
         document.querySelectorAll('.sentence-block').forEach(el => el.classList.remove('active'));
     }
 
+    function switchToReadMode() {
+        state.mode = 'READ';
+        document.getElementById('input-area').classList.add('hidden');
+        document.getElementById('reader-area').classList.remove('hidden');
+        document.getElementById('play-controls').classList.remove('hidden');
+        document.getElementById('edit-btn').classList.remove('hidden');
+    }
+
+    function switchToEditMode() {
+        stopReading();
+        state.mode = 'EDIT';
+        document.getElementById('input-area').classList.remove('hidden');
+        document.getElementById('reader-area').classList.add('hidden');
+        document.getElementById('play-controls').classList.add('hidden');
+        document.getElementById('edit-btn').classList.add('hidden');
+        updateBtnIcon('▶️');
+    }
+
     function updateBtnIcon(icon) {
-        const btn = document.getElementById('main-btn');
-        btn.innerText = icon;
+        document.getElementById('main-btn').innerText = icon;
+    }
+
+    async function showToast(word) {
+        const toast = document.getElementById('word-toast');
+        const tWord = document.getElementById('toast-word');
+        const tMean = document.getElementById('toast-mean');
+        tWord.innerText = word; tMean.innerText = "查詢中...";
+        toast.classList.add('show');
+        try {
+            const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=en|zh-TW`);
+            const data = await res.json();
+            if (data.responseData) tMean.innerText = data.responseData.translatedText.replace(/[!.。]/g, "");
+            else tMean.innerText = "無結果";
+        } catch (e) { tMean.innerText = "網路錯誤"; }
+        setTimeout(() => {
+            toast.classList.remove('show');
+            document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
+        }, 3000);
     }
 
     async function doTranslate(text, el) {
@@ -433,14 +406,9 @@ They became best friends forever.
         try {
             const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|zh-TW`);
             const data = await res.json();
-            if (data.responseData) {
-                el.innerText = data.responseData.translatedText;
-            } else {
-                el.innerText = "翻譯失敗";
-            }
-        } catch (e) {
-            el.innerText = "網路錯誤";
-        }
+            if (data.responseData) el.innerText = data.responseData.translatedText;
+            else el.innerText = "翻譯失敗";
+        } catch (e) { el.innerText = "網路錯誤"; }
     }
 </script>
 </body>
