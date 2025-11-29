@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Magic Story Reader V3.3 (最終防爆版)</title>
+    <title>Magic Story Reader V3.4 (核彈級修復)</title>
     <style>
         :root {
             --primary: #6C5CE7;
@@ -102,7 +102,7 @@
 
 <header>
     <div class="header-top">
-        <h1>📖 魔法故事書 V3.3</h1>
+        <h1>📖 魔法故事書 V3.4</h1>
         <button class="btn hidden" id="edit-btn">✏️ 換文章</button>
     </div>
     
@@ -148,8 +148,9 @@ They became best friends forever.
         sentences: [],
         currentIdx: 0,
         synth: window.speechSynthesis,
-        currentUtterance: null, // 關鍵：追蹤正在講話的物件
-        lastClickTime: 0 // 防連點
+        // 核心修復：使用 runId (流水號) 來驗證語音是否該繼續
+        runId: 0,
+        lastClickTime: 0
     };
 
     window.addEventListener('DOMContentLoaded', () => {
@@ -183,10 +184,9 @@ They became best friends forever.
             select.appendChild(opt);
 
             let score = 0;
-            // 語音優先級演算法
-            if (v.name.includes('Google') && v.lang === 'en-US') score = 100; // Android/Chrome 首選
-            else if (v.name.includes('Samantha')) score = 95; // iOS 首選
-            else if (v.name.includes('Siri')) score = 90; // iOS 次選
+            if (v.name.includes('Google') && v.lang === 'en-US') score = 100;
+            else if (v.name.includes('Samantha')) score = 95;
+            else if (v.name.includes('Siri')) score = 90;
             else if (v.lang === 'en-US') score = 50;
             else if (v.lang.startsWith('en')) score = 10;
 
@@ -204,6 +204,9 @@ They became best friends forever.
             if (!text) return alert("請先輸入文章！");
             processText(text);
             switchToReadMode();
+            
+            // 開始新的播放，更新流水號
+            state.runId++;
             playSentence(0);
         } else {
             if (state.playing) pauseReading();
@@ -230,7 +233,6 @@ They became best friends forever.
     }
 
     function processText(text) {
-        // 使用更精確的 Regex，保留標點
         const raw = text.replace(/([.?!])\s*(?=[A-Z"'])/g, "$1|").split("|");
         const container = document.getElementById('reader-area');
         container.innerHTML = '';
@@ -243,14 +245,17 @@ They became best friends forever.
             
             const wordsHtml = line.trim().split(/([a-zA-Z0-9'-]+)/g).map(chunk => {
                 if (/[a-zA-Z0-9'-]+/.test(chunk)) {
-                    // 使用 onclick，並傳入 event
                     return `<span class="word" onclick="handleWordClick(event, '${chunk}')">${chunk}</span>`;
                 }
                 return chunk; 
             }).join('');
 
             div.innerHTML = `<div class="en-text">${wordsHtml}</div><div class="zh-text" id="trans-${i}"></div>`;
-            div.onclick = () => playSentence(i); 
+            div.onclick = () => {
+                // 點擊整句時，更新流水號，確保舊的停止
+                state.runId++;
+                playSentence(i);
+            };
             
             container.appendChild(div);
             state.sentences.push({ 
@@ -263,39 +268,36 @@ They became best friends forever.
     }
 
     // ========================
-    // 解決手機唸兩次的關鍵修復
+    // 單字點讀 (使用流水號防爆)
     // ========================
     function handleWordClick(event, word) {
         event.stopPropagation();
         
-        // 防連點機制 (Debounce)
         const now = Date.now();
         if (now - state.lastClickTime < 300) return; 
         state.lastClickTime = now;
 
-        // 1. 強制切斷上一句的連結
-        // 這是解決 Zombie Callback 的核心：把正在唸的物件 onend 設為 null
-        if (state.currentUtterance) {
-            state.currentUtterance.onend = null;
-        }
+        // 1. 【關鍵】更新流水號：這會讓所有之前的 onend 事件全部失效
+        state.runId++;
 
         // 2. 停止語音與狀態
         state.synth.cancel();
         state.playing = false;
         updateBtnIcon('▶️');
         
-        // 3. 視覺回饋
+        // 3. UI 處理
         document.querySelectorAll('.word').forEach(w => w.classList.remove('word-active'));
         event.target.classList.add('word-active');
 
-        // 4. 朗讀單字
-        const utter = new SpeechSynthesisUtterance(word);
-        const voices = state.synth.getVoices();
-        const vIdx = document.getElementById('voiceSelect').value;
-        if(voices[vIdx]) utter.voice = voices[vIdx];
-        
-        state.currentUtterance = utter; // 記錄這個單字語音
-        state.synth.speak(utter);
+        // 4. 朗讀單字 (延遲 50ms 讓手機瀏覽器有時間清理上一句的 cancel)
+        setTimeout(() => {
+            const utter = new SpeechSynthesisUtterance(word);
+            const voices = state.synth.getVoices();
+            const vIdx = document.getElementById('voiceSelect').value;
+            if(voices[vIdx]) utter.voice = voices[vIdx];
+            
+            state.synth.speak(utter);
+        }, 50);
 
         // 5. 翻譯
         showToast(word);
@@ -330,20 +332,18 @@ They became best friends forever.
     }
 
     // ========================
-    // 句子播放邏輯
+    // 句子播放 (加入 ID 驗證)
     // ========================
     function playSentence(index) {
+        // 記錄下開始播放時的 ID
+        const currentRunId = state.runId;
+
         if (index >= state.sentences.length) {
             stopReading();
             return;
         }
 
-        // 切斷上一句連結
-        if (state.currentUtterance) {
-            state.currentUtterance.onend = null;
-        }
         state.synth.cancel();
-
         state.currentIdx = index;
         state.playing = true;
         updateBtnIcon('⏸');
@@ -366,27 +366,37 @@ They became best friends forever.
         if(voices[vIdx]) utter.voice = voices[vIdx];
         utter.rate = document.getElementById('rate').value;
 
-        // 只有 state.playing 為真時才繼續，且將此物件記為 currentUtterance
-        utter.onend = () => { if (state.playing) playSentence(index + 1); };
-        utter.onerror = () => { if (state.playing) playSentence(index + 1); };
+        utter.onend = () => {
+            // 【核心防護】
+            // 只有當「全域流水號」等於「這句播放時的流水號」才繼續
+            // 如果中途有點擊單字，state.runId 已經變了，這裡就會直接 return，不會執行下一句
+            if (state.runId !== currentRunId) return;
 
-        state.currentUtterance = utter;
+            if (state.playing) playSentence(index + 1);
+        };
+        
+        utter.onerror = () => {
+            if (state.runId !== currentRunId) return;
+            if (state.playing) playSentence(index + 1);
+        };
+
         state.synth.speak(utter);
     }
 
     function pauseReading() {
-        if (state.currentUtterance) state.currentUtterance.onend = null;
+        state.runId++; // 暫停也換號碼，防止任何殘留語音觸發
         state.synth.cancel();
         state.playing = false;
         updateBtnIcon('▶️');
     }
 
     function resumeReading() {
+        state.runId++;
         playSentence(state.currentIdx);
     }
 
     function stopReading() {
-        if (state.currentUtterance) state.currentUtterance.onend = null;
+        state.runId++;
         state.synth.cancel();
         state.playing = false;
         state.currentIdx = 0;
